@@ -1,4 +1,6 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import html2canvas from 'html2canvas';
+import { QRCodeCanvas } from 'qrcode.react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, onSnapshot, setDoc, doc, deleteDoc, getDoc } from 'firebase/firestore';
 import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, User } from 'firebase/auth';
@@ -63,6 +65,32 @@ const safeFloat = (val: any): number => {
 };
 
 const formatNum = (val: number): string => val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const formatBurmeseNumber = (num: number): string => {
+  if (num <= 0) return '၀';
+  
+  const units = [
+    { value: 100000, name: 'သိန်း' },
+    { value: 10000, name: 'သောင်း' },
+    { value: 1000, name: 'ထောင်' },
+    { value: 100, name: 'ရာ' },
+    { value: 10, name: 'ဆယ်' },
+    { value: 1, name: '' }
+  ];
+
+  let result = '';
+  let remaining = num;
+
+  for (const unit of units) {
+    if (remaining >= unit.value) {
+      const count = Math.floor(remaining / unit.value);
+      result += `${count}${unit.name}`;
+      remaining %= unit.value;
+    }
+  }
+
+  return result;
+};
 
 const calculateRecord = (r: RecordData) => {
   const morning = safeFloat(r.morningOpening);
@@ -495,6 +523,7 @@ export default function App() {
                 { id: 'profit-loss', icon: 'fa-scale-balanced', label: 'အရှုံး/အမြတ် ရှင်းတမ်း' },
                 { id: 'deposits', icon: 'fa-building-columns', label: 'ဘဏ်သွင်းငွေများ' },
                 { id: 'expenses', icon: 'fa-file-invoice-dollar', label: 'ကုန်ကျစရိတ်များ' },
+                { id: 'voucher', icon: 'fa-file-invoice', label: 'ဘောက်ချာထုတ်ရန်' },
                 { id: 'settings', icon: 'fa-gear', label: 'ဆက်တင်များ' },
               ].map(tab => (
                 <button
@@ -544,9 +573,10 @@ export default function App() {
           });
         }} onEdit={(r: RecordData) => { /* Implement Edit */ }} />}
         {activeTab === 'summary' && <Summary records={records} />}
-        {activeTab === 'profit-loss' && <ProfitLossStatement records={records} />}
+        {activeTab === 'profit-loss' && <ProfitLossStatement records={records} settings={settings} />}
         {activeTab === 'deposits' && <DepositsList records={records} />}
         {activeTab === 'expenses' && <ExpensesList records={records} />}
+        {activeTab === 'voucher' && <VoucherGenerator />}
         {activeTab === 'settings' && <SettingsPanel settings={settings} setSettings={setSettings} user={user} />}
       </main>
 
@@ -572,17 +602,72 @@ function Dashboard({ records, settings }: { records: RecordData[], settings: Set
   const chartData = last30Days.map(r => calculateRecord(r).netProfit);
 
   // AI Insight
-  let insight = { type: 'info', icon: 'fa-lightbulb', text: 'ယနေ့အတွက် စာရင်းမသွင်းရသေးပါ။', color: 'text-blue-600', bg: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800' };
-  if (calc) {
-    const stockAlert = safeFloat(settings.stockAlert);
-    const currentStock = safeFloat(todayRecord?.nightClosing) || ((safeFloat(todayRecord?.morningOpening) + safeFloat(todayRecord?.stockAdded)));
+  let insight = { type: 'info', icon: 'fa-lightbulb', text: 'ယနေ့အတွက် စာရင်းမသွင်းရသေးပါ။ ယမန်နေ့က စာရင်းများကို ပြန်လည်စစ်ဆေးနိုင်ပါသည်။', color: 'text-blue-600', bg: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800' };
+  
+  const stockAlert = safeFloat(settings.stockAlert);
+  const latestRecord = records.length > 0 ? records[0] : null;
+  
+  if (latestRecord) {
+    const latestCalc = calculateRecord(latestRecord);
+    const currentStock = safeFloat(latestRecord.nightClosing) || ((safeFloat(latestRecord.morningOpening) + safeFloat(latestRecord.stockAdded)));
     
-    if (currentStock < stockAlert) {
-      insight = { type: 'danger', icon: 'fa-triangle-exclamation', text: `သတိပြုရန်: လက်ကျန်ပွိုင့် (${formatNum(currentStock)}) သည် သတ်မှတ်ထားသော ပမာဏအောက် ရောက်နေပါသည်။`, color: 'text-red-600', bg: 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800' };
-    } else if (calc.netProfit > 100000) {
-      insight = { type: 'success', icon: 'fa-arrow-trend-up', text: 'ဂုဏ်ယူပါသည်! ယနေ့ အသားတင်အမြတ် ၁ သိန်းကျော်ပါသည်။', color: 'text-green-600', bg: 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800' };
+    const last7Days = records.slice(0, 7);
+    const avg7DaySales = last7Days.reduce((sum, r) => sum + calculateRecord(r).totalSales, 0) / (last7Days.length || 1);
+    
+    const remainingTarget = target - monthProfit;
+    const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
+    const currentDay = new Date().getDate();
+    const daysLeft = daysInMonth - currentDay + 1;
+    const requiredDailyProfit = remainingTarget > 0 ? remainingTarget / daysLeft : 0;
+
+    if (currentStock < stockAlert && currentStock > 0) {
+      insight = { 
+        type: 'danger', 
+        icon: 'fa-triangle-exclamation', 
+        text: `သတိပြုရန်: လက်ကျန်ပွိုင့် (${formatNum(currentStock)}) သာ ကျန်ရှိပါတော့သည်။ ပွိုင့်ထပ်ဖြည့်ရန် လိုအပ်နေပါသည်။`, 
+        color: 'text-red-600', 
+        bg: 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800' 
+      };
+    } else if (latestCalc.totalExpenses > latestCalc.grossProfit && latestCalc.totalExpenses > 0) {
+      insight = { 
+        type: 'warning', 
+        icon: 'fa-circle-exclamation', 
+        text: `သတိပြုရန်: ${latestRecord.date} ရက်နေ့တွင် ကုန်ကျစရိတ် (${formatNum(latestCalc.totalExpenses)}) သည် အကြမ်းဖျင်းအမြတ်ထက် များနေပါသည်။ စရိတ်လျှော့ချရန် စဉ်းစားပါ။`, 
+        color: 'text-orange-600', 
+        bg: 'bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-800' 
+      };
+    } else if (latestCalc.totalSales > avg7DaySales * 1.2 && avg7DaySales > 0) {
+      insight = { 
+        type: 'success', 
+        icon: 'fa-arrow-trend-up', 
+        text: `ကောင်းမွန်သော တိုးတက်မှု: ${latestRecord.date} ရက်နေ့ အရောင်းသည် ပြီးခဲ့သော ၇ ရက် ပျမ်းမျှအရောင်းထက် ၂၀% ပိုများနေပါသည်။ ဆက်လက်ထိန်းသိမ်းပါ။`, 
+        color: 'text-green-600', 
+        bg: 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800' 
+      };
+    } else if (remainingTarget <= 0 && target > 0) {
+      insight = { 
+        type: 'success', 
+        icon: 'fa-award', 
+        text: `ဂုဏ်ယူပါသည်! ယခုလအတွက် ရည်မှန်းထားသော အမြတ်ငွေ Target ကို အောင်မြင်စွာ ပြည့်မီသွားပါပြီ။`, 
+        color: 'text-green-600', 
+        bg: 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800' 
+      };
+    } else if (remainingTarget > 0 && daysLeft > 0 && target > 0) {
+      insight = { 
+        type: 'info', 
+        icon: 'fa-bullseye', 
+        text: `လစဉ် Target ပြည့်မီရန် နောက်ထပ် ${daysLeft} ရက်အတွင်း တစ်ရက်လျှင် ပျမ်းမျှ အမြတ်ငွေ ${formatNum(requiredDailyProfit)} ကျပ် ရှာဖွေရန် လိုအပ်ပါသည်။`, 
+        color: 'text-blue-600', 
+        bg: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800' 
+      };
     } else {
-      insight = { type: 'info', icon: 'fa-check-circle', text: 'လုပ်ငန်းလည်ပတ်မှု ပုံမှန်ရှိပါသည်။', color: 'text-blue-600', bg: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800' };
+      insight = { 
+        type: 'info', 
+        icon: 'fa-chart-line', 
+        text: `လုပ်ငန်းလည်ပတ်မှု ပုံမှန်ရှိပါသည်။ ${latestRecord.date} တွင် အသားတင်အမြတ် ${formatNum(latestCalc.netProfit)} ကျပ် ရရှိခဲ့ပါသည်။`, 
+        color: 'text-blue-600', 
+        bg: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800' 
+      };
     }
   }
 
@@ -1155,7 +1240,7 @@ function ExpensesList({ records }: { records: RecordData[] }) {
   );
 }
 
-function ProfitLossStatement({ records }: { records: RecordData[] }) {
+function ProfitLossStatement({ records, settings }: { records: RecordData[], settings: Settings }) {
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
   
   const monthRecords = records.filter(r => r.date.startsWith(selectedMonth));
@@ -1166,6 +1251,9 @@ function ProfitLossStatement({ records }: { records: RecordData[] }) {
   
   const grossProfit = totalSales - totalCapital;
   const netProfit = grossProfit - totalExpenses;
+
+  const monthlyTarget = safeFloat(settings.monthlyTarget);
+  const remainingTarget = monthlyTarget - netProfit;
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
@@ -1206,6 +1294,21 @@ function ProfitLossStatement({ records }: { records: RecordData[] }) {
                 Profit Margin: {((netProfit / totalSales) * 100).toFixed(1)}%
               </div>
             )}
+            
+            {monthlyTarget > 0 && (
+              <div className="mt-4 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-2xl border border-blue-100 dark:border-blue-800/50 w-full max-w-md">
+                <div className="text-sm text-blue-600 dark:text-blue-400 font-bold mb-2">လစဉ် Target: {formatNum(monthlyTarget)}</div>
+                {remainingTarget > 0 ? (
+                  <div className="text-gray-700 dark:text-gray-300">
+                    ဒီလ Target ထိဖို့ <span className="font-bold text-blue-600 dark:text-blue-400">{formatBurmeseNumber(remainingTarget)}</span> လိုသေးတယ်
+                  </div>
+                ) : (
+                  <div className="text-green-600 dark:text-green-400 font-bold">
+                    <i className="fa-solid fa-party-horn mr-2"></i> ဂုဏ်ယူပါတယ်! ဒီလ Target ပြည့်သွားပါပြီ။
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1214,8 +1317,28 @@ function ProfitLossStatement({ records }: { records: RecordData[] }) {
 }
 
 function SettingsPanel({ settings, setSettings, user }: any) {
+  const [localSettings, setLocalSettings] = useState(settings);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
   const handleChange = (field: string, value: any) => {
-    setSettings({ ...settings, [field]: value });
+    setLocalSettings({ ...localSettings, [field]: value });
+    setSaveSuccess(false);
+  };
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    setSettings(localSettings);
+    if (user && db) {
+      try {
+        await setDoc(doc(db, 'users', user.uid, 'settings', 'config'), localSettings);
+        setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 3000);
+      } catch (error) {
+        console.error("Error saving settings:", error);
+      }
+    }
+    setIsSaving(false);
   };
 
   return (
@@ -1234,22 +1357,404 @@ function SettingsPanel({ settings, setSettings, user }: any) {
 
       <div>
         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">App PIN (ဂဏန်း ၄ လုံး သို့ ၆ လုံး)</label>
-        <input type="password" value={settings.pin} onChange={e => handleChange('pin', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="PIN မထားလိုပါက အလွတ်ထားပါ" />
+        <input type="password" value={localSettings.pin} onChange={e => handleChange('pin', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="PIN မထားလိုပါက အလွတ်ထားပါ" />
       </div>
 
       <div>
         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">လစဉ် အမြတ်ပစ်မှတ် (Target)</label>
-        <input type="number" value={settings.monthlyTarget} onChange={e => handleChange('monthlyTarget', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" />
+        <input type="number" value={localSettings.monthlyTarget} onChange={e => handleChange('monthlyTarget', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" />
       </div>
 
       <div>
         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">လက်ကျန်ပွိုင့် သတိပေးချက် (Stock Alert)</label>
-        <input type="number" value={settings.stockAlert} onChange={e => handleChange('stockAlert', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" />
+        <input type="number" value={localSettings.stockAlert} onChange={e => handleChange('stockAlert', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" />
       </div>
 
       <div>
         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">ဒေါ်လာ ငွေလဲနှုန်း (Exchange Rate)</label>
-        <input type="number" value={settings.exchangeRate} onChange={e => handleChange('exchangeRate', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" />
+        <input type="number" value={localSettings.exchangeRate} onChange={e => handleChange('exchangeRate', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" />
+      </div>
+
+      <div className="pt-4">
+        <button 
+          onClick={handleSave} 
+          disabled={isSaving}
+          className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-lg transition shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 disabled:opacity-70"
+        >
+          {isSaving ? (
+            <><i className="fa-solid fa-spinner fa-spin"></i> သိမ်းဆည်းနေပါသည်...</>
+          ) : saveSuccess ? (
+            <><i className="fa-solid fa-check"></i> အောင်မြင်စွာ သိမ်းဆည်းပြီးပါပြီ</>
+          ) : (
+            <><i className="fa-solid fa-save"></i> သိမ်းဆည်းမည်</>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function VoucherGenerator() {
+  const [customerName, setCustomerName] = useState('');
+  const [items, setItems] = useState([{ email: '', plan: '1 Device (1 Month) - 13000 Ks', qty: 1 }]);
+  const [paymentMethod, setPaymentMethod] = useState('KBZ PAY');
+  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [discount, setDiscount] = useState<number | ''>('');
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  
+  const voucherRef = useRef<HTMLDivElement>(null);
+
+  const plans = [
+    { name: '1 Device (3 Days)', price: '2700 Ks' },
+    { name: '1 Device (1 Month)', price: '13000 Ks' },
+    { name: '1 Device (2 Months)', price: '25000 Ks' },
+    { name: '1 Device (3 Months)', price: '37500 Ks' },
+    { name: '1 Device (4 Months)', price: '50000 Ks' },
+    { name: '1 Device (5 Months)', price: '62500 Ks' },
+    { name: '1 Device (6 Months)', price: '75000 Ks' },
+    { name: '2 Device (1 Month)', price: '18000 Ks' },
+    { name: '2 Device (2 Months)', price: '35000 Ks' },
+    { name: '2 Device (3 Months)', price: '52500 Ks' },
+    { name: '2 Device (6 Months)', price: '90000 Ks' },
+    { name: '2 Device (12 Months)', price: '108000 Ks' }
+  ];
+
+  const paymentMethods = ['KBZ PAY', 'Wave Money', 'AYA Pay', 'MMQR'];
+
+  const addItem = () => {
+    setItems([...items, { email: '', plan: '1 Device (1 Month) - 13000 Ks', qty: 1 }]);
+  };
+
+  const removeItem = (index: number) => {
+    if (items.length > 1) {
+      setItems(items.filter((_, i) => i !== index));
+    }
+  };
+
+  const updateItem = (index: number, field: string, value: string | number) => {
+    const newItems = [...items];
+    newItems[index] = { ...newItems[index], [field]: value as never };
+    setItems(newItems);
+  };
+
+  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX_WIDTH = 200;
+          const MAX_HEIGHT = 200;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height *= MAX_WIDTH / width;
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width *= MAX_HEIGHT / height;
+              height = MAX_HEIGHT;
+            }
+          }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, width, height);
+          setLogoUrl(canvas.toDataURL('image/png'));
+        };
+        img.src = event.target?.result as string;
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const subtotal = items.reduce((sum, item) => {
+    const priceStr = item.plan.split(' - ')[1];
+    const price = parseInt(priceStr.replace(/[^0-9]/g, '')) || 0;
+    return sum + (price * item.qty);
+  }, 0);
+  
+  const totalAmount = subtotal - (Number(discount) || 0);
+
+  const qrData = JSON.stringify({
+    N: customerName,
+    D: date,
+    I: items.map(i => `${i.qty}x ${i.plan.split(' - ')[0]}`),
+    S: subtotal,
+    Disc: Number(discount) || 0,
+    T: totalAmount,
+    P: paymentMethod
+  });
+
+  const handleDownload = async () => {
+    if (voucherRef.current) {
+      try {
+        const canvas = await html2canvas(voucherRef.current, {
+          scale: 2,
+          backgroundColor: '#ffffff',
+          useCORS: true
+        });
+        const image = canvas.toDataURL('image/png', 1.0);
+        const link = document.createElement('a');
+        link.download = `Voucher_${customerName || 'Customer'}_${date}.png`;
+        link.href = image;
+        link.click();
+      } catch (error) {
+        console.error('Error generating voucher image:', error);
+        alert('ဘောက်ချာထုတ်ရာတွင် အမှားအယွင်းဖြစ်ပေါ်ခဲ့ပါသည်။');
+      }
+    }
+  };
+
+  return (
+    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
+      <h2 className="text-2xl font-bold">ဘောက်ချာထုတ်ရန်</h2>
+      
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Form Section */}
+        <div className="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 p-6 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Customer Telegram Name</label>
+            <input 
+              type="text" 
+              value={customerName} 
+              onChange={e => setCustomerName(e.target.value)} 
+              className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" 
+              placeholder="e.g. John Doe"
+            />
+          </div>
+          
+          <div className="space-y-4">
+            <div className="flex justify-between items-center">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">အကောင့်နှင့် ပလန်များ</label>
+              <button onClick={addItem} className="text-sm text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1">
+                <i className="fa-solid fa-plus"></i> အကောင့်ထပ်ထည့်မည်
+              </button>
+            </div>
+            
+            {items.map((item, index) => (
+              <div key={index} className="p-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50 space-y-3 relative">
+                {items.length > 1 && (
+                  <button 
+                    onClick={() => removeItem(index)} 
+                    className="absolute top-2 right-2 w-6 h-6 flex items-center justify-center rounded-full bg-red-100 text-red-600 hover:bg-red-200 transition"
+                  >
+                    <i className="fa-solid fa-xmark text-xs"></i>
+                  </button>
+                )}
+                
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Gmail (အကောင့် {index + 1})</label>
+                  <input 
+                    type="email" 
+                    value={item.email} 
+                    onChange={e => updateItem(index, 'email', e.target.value)} 
+                    className="w-full p-2.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none text-sm" 
+                    placeholder="e.g. user@gmail.com"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Plan ရွေးချယ်ရန်</label>
+                    <select 
+                      value={item.plan} 
+                      onChange={e => updateItem(index, 'plan', e.target.value)} 
+                      className="w-full p-2.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+                    >
+                      {plans.map(p => (
+                        <option key={p.name} value={`${p.name} - ${p.price}`}>{p.name} - {p.price}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">အရေအတွက် (Quantity)</label>
+                    <input 
+                      type="number" 
+                      min="1"
+                      value={item.qty} 
+                      onChange={e => updateItem(index, 'qty', parseInt(e.target.value) || 1)} 
+                      className="w-full p-2.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none text-sm" 
+                    />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Payment Method</label>
+              <select 
+                value={paymentMethod} 
+                onChange={e => setPaymentMethod(e.target.value)} 
+                className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+              >
+                {paymentMethods.map(pm => (
+                  <option key={pm} value={pm}>{pm}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">ရက်စွဲ</label>
+              <input 
+                type="date" 
+                value={date} 
+                onChange={e => setDate(e.target.value)} 
+                className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" 
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Discount (လျော့ပေးငွေ)</label>
+              <input 
+                type="number" 
+                value={discount} 
+                onChange={e => setDiscount(e.target.value === '' ? '' : Number(e.target.value))} 
+                className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" 
+                placeholder="0"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Logo ပုံထည့်ရန် (Optional)</label>
+              <input 
+                type="file" 
+                accept="image/*"
+                onChange={handleLogoUpload} 
+                className="w-full p-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none text-sm file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" 
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Preview Section */}
+        <div className="space-y-4">
+          <div className="flex justify-between items-center">
+            <h3 className="text-lg font-bold text-gray-700 dark:text-gray-300">Voucher Preview</h3>
+            <button 
+              onClick={handleDownload}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition shadow-md flex items-center gap-2"
+            >
+              <i className="fa-solid fa-download"></i> Save as Image
+            </button>
+          </div>
+          
+          <div className="overflow-x-auto pb-4">
+            <div 
+              ref={voucherRef} 
+              className="bg-white p-8 rounded-xl shadow-sm border border-gray-200 w-full max-w-md mx-auto relative overflow-hidden text-gray-800"
+              style={{ minWidth: '350px' }}
+            >
+              {/* Decorative Header */}
+              <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-blue-500 to-indigo-600"></div>
+              
+              <div className="text-center mb-8 mt-2">
+                {/* Logo Area */}
+                <div className="flex justify-center items-center h-20 mb-3">
+                  {logoUrl ? (
+                    <img 
+                      src={logoUrl} 
+                      alt="Logo" 
+                      style={{ maxWidth: '80px', maxHeight: '80px', objectFit: 'contain' }}
+                    />
+                  ) : (
+                    <div className="relative w-20 h-20 mx-auto">
+                      <img 
+                        src="/jumpjump.png" 
+                        alt="Jump Jump VPN" 
+                        className="w-full h-full object-contain"
+                        onError={(e) => {
+                          e.currentTarget.style.display = 'none';
+                          e.currentTarget.nextElementSibling?.classList.remove('hidden');
+                          e.currentTarget.nextElementSibling?.classList.add('flex');
+                        }}
+                      />
+                      <div className="hidden items-center justify-center w-full h-full rounded-full bg-blue-50 text-blue-600">
+                        <i className="fa-solid fa-shield-halved text-4xl"></i>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                
+                <h1 className="text-2xl font-black tracking-tight text-gray-900 uppercase">Jump Jump VPN</h1>
+                <p className="text-sm text-gray-500 font-medium tracking-widest uppercase mt-1">Official Receipt</p>
+              </div>
+
+              <div className="space-y-5">
+                <div className="flex justify-between items-center border-b border-gray-100 pb-3">
+                  <span className="text-gray-500 text-sm">Date</span>
+                  <span className="font-medium">{date}</span>
+                </div>
+                
+                <div className="flex justify-between items-center border-b border-gray-100 pb-3">
+                  <span className="text-gray-500 text-sm">Customer</span>
+                  <span className="font-bold text-gray-900">{customerName || '-'}</span>
+                </div>
+                
+                <div className="border-b border-gray-100 pb-3">
+                  <span className="text-gray-500 text-sm block mb-2">Purchased Accounts</span>
+                  <div className="space-y-2">
+                    {items.map((item, idx) => (
+                      <div key={idx} className="bg-gray-50 p-2 rounded-lg flex justify-between items-center">
+                        <div className="flex flex-col">
+                          <span className="font-medium text-blue-600 text-sm">{item.email || '-'}</span>
+                          <span className="text-xs text-gray-500 font-bold">{item.qty}x {item.plan.split(' - ')[0]}</span>
+                        </div>
+                        <span className="font-bold text-gray-800 text-sm">
+                          {formatNum((parseInt(item.plan.split(' - ')[1].replace(/[^0-9]/g, '')) || 0) * item.qty)} Ks
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                
+                <div className="flex justify-between items-center border-b border-gray-100 pb-3">
+                  <span className="text-gray-500 text-sm">Payment</span>
+                  <span className="font-medium">{paymentMethod}</span>
+                </div>
+                
+                {Number(discount) > 0 && (
+                  <div className="flex justify-between items-center border-b border-gray-100 pb-3">
+                    <span className="text-gray-500 text-sm">Discount</span>
+                    <span className="font-medium text-red-500">-{formatNum(Number(discount))} Ks</span>
+                  </div>
+                )}
+                
+                <div className="flex justify-between items-center pt-2">
+                  <span className="text-gray-500 font-medium">Total Amount</span>
+                  <span className="text-2xl font-black text-indigo-600">{formatNum(totalAmount)} Ks</span>
+                </div>
+              </div>
+
+              <div className="mt-8 flex justify-center">
+                <div className="p-2 bg-white rounded-xl border border-gray-200 shadow-sm">
+                  <QRCodeCanvas 
+                    value={qrData} 
+                    size={100} 
+                    level={"L"}
+                    includeMargin={false}
+                  />
+                </div>
+              </div>
+
+              <div className="mt-6 pt-6 border-t border-dashed border-gray-300 text-center">
+                <p className="text-sm text-gray-500 mb-2">Thank you for your purchase!</p>
+                <div className="inline-flex items-center gap-2 bg-blue-50 px-4 py-2 rounded-full">
+                  <i className="fa-brands fa-telegram text-blue-500"></i>
+                  <span className="font-bold text-blue-700 text-sm">@AHM_ADMIN</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
