@@ -1497,7 +1497,9 @@ function VoucherGenerator() {
         const canvas = await html2canvas(voucherRef.current, {
           scale: 2,
           backgroundColor: '#ffffff',
-          useCORS: true
+          useCORS: true,
+          allowTaint: true,
+          logging: false
         });
         const image = canvas.toDataURL('image/png', 1.0);
         const link = document.createElement('a');
@@ -1663,6 +1665,7 @@ function VoucherGenerator() {
                     <img 
                       src={logoUrl} 
                       alt="Logo" 
+                      crossOrigin="anonymous"
                       style={{ maxWidth: '80px', maxHeight: '80px', objectFit: 'contain' }}
                     />
                   ) : (
@@ -1670,6 +1673,7 @@ function VoucherGenerator() {
                       <img 
                         src="/jumpjump.png" 
                         alt="Jump Jump VPN" 
+                        crossOrigin="anonymous"
                         className="w-full h-full object-contain"
                         onError={(e) => {
                           e.currentTarget.style.display = 'none';
