@@ -1,13 +1,176 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import html2canvas from 'html2canvas';
-import { QRCodeCanvas } from 'qrcode.react';
+import { GoogleGenAI } from "@google/genai";
+import { domToPng } from 'modern-screenshot';
+import { QRCodeSVG } from 'qrcode.react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, onSnapshot, setDoc, doc, deleteDoc, getDoc } from 'firebase/firestore';
 import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, User } from 'firebase/auth';
 
+// --- AI Assistant ---
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "AIzaSyALxhcG2x7V49u_b_tvgHWjslrpzigmlYI" });
+
+const AIAssistant = ({ records, settings }: { records: RecordData[], settings: Settings }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [messages, setMessages] = useState<{ role: 'user' | 'ai', text: string }[]>([
+    { role: 'ai', text: 'မင်္ဂလာပါ! ကျွန်တော်က Jump Jump VPN ရဲ့ AI Assistant ပါ။ လူကြီးမင်းရဲ့ လုပ်ငန်းအချက်အလက်တွေကို အခြေခံပြီး ဘာများကူညီပေးရမလဲခင်ဗျာ?' }
+  ]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  const handleSend = async () => {
+    if (!input.trim() || loading) return;
+    
+    const userMsg = input.trim();
+    setInput('');
+    setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+    setLoading(true);
+
+    // Calculate business statistics for context
+    const totalRevenue = records.reduce((sum, r) => {
+      const morning = parseInt(r.morningOpening) || 0;
+      const closing = parseInt(r.nightClosing) || 0;
+      const added = parseInt(r.stockAdded) || 0;
+      const sales = (morning + added) - closing;
+      return sum + (sales * (parseInt(r.costPerPoint) || 0));
+    }, 0);
+
+    const totalExpenses = records.reduce((sum, r) => {
+      return sum + r.expenses.reduce((eSum, e) => eSum + (parseInt(e.amount) || 0), 0);
+    }, 0);
+
+    const netProfit = totalRevenue - totalExpenses;
+    const avgProfit = records.length > 0 ? netProfit / records.length : 0;
+
+    // Prepare context from records
+    const businessContext = `
+      Business Summary:
+      - Total Days Recorded: ${records.length}
+      - Total Revenue: ${totalRevenue.toLocaleString()} Ks
+      - Total Expenses: ${totalExpenses.toLocaleString()} Ks
+      - Net Profit: ${netProfit.toLocaleString()} Ks
+      - Average Profit/Day: ${avgProfit.toLocaleString()} Ks
+      - Monthly Target: ${settings.monthlyTarget} Ks
+      - Current Exchange Rate: ${settings.exchangeRate} Ks
+      
+      Recent Activity (Last 5 days):
+      ${records.slice(0, 5).map(r => `Date: ${r.date}, Morning: ${r.morningOpening}, Added: ${r.stockAdded}, Night: ${r.nightClosing}, Expenses: ${r.expenses.length}`).join('\n')}
+    `;
+
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview", 
+        contents: userMsg,
+        config: {
+          systemInstruction: `You are "Jump Jump", a highly intelligent, professional, and friendly business partner for a VPN Agent in Myanmar. 
+          You are NOT just an AI; you are a dedicated business advisor who knows every detail of this business.
+          
+          User's Business Data:
+          ${businessContext}
+          
+          Guidelines:
+          1. Speak naturally and warmly in Burmese (Unicode). Use polite particles like "ခင်ဗျာ" or "ပါရှင့်" as appropriate (default to professional male tone "ခင်ဗျာ").
+          2. When asked about money, profits, or performance, use the provided data to give specific answers.
+          3. If the user asks "How is my business doing?", analyze the profit vs target and give an encouraging, expert opinion.
+          4. If they ask about expenses, summarize where the money is going.
+          5. Be proactive. If you notice high expenses or low profit, suggest ways to improve.
+          6. Always be helpful and act like a real person who cares about the success of "Jump Jump VPN".
+          7. Use English for numbers and technical terms if it makes it clearer, but keep the conversation in Burmese.`,
+        }
+      });
+      
+      const aiText = response.text || "တောင်းပန်ပါတယ်၊ အခုလောလောဆယ် အဖြေမပေးနိုင်သေးပါဘူး။";
+      setMessages(prev => [...prev, { role: 'ai', text: aiText }]);
+    } catch (error) {
+      console.error("AI Error:", error);
+      setMessages(prev => [...prev, { role: 'ai', text: "Error: AI နဲ့ ချိတ်ဆက်ရာမှာ အခက်အခဲရှိနေပါတယ်။" }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed bottom-6 right-6 z-50">
+      {isOpen ? (
+        <div className="glass-card w-80 sm:w-96 h-[500px] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+          <div className="flex justify-between items-center mb-4 pb-2 border-b border-white/20">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+              <h3 className="font-bold">AI Assistant</h3>
+            </div>
+            <button onClick={() => setIsOpen(false)} className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-white transition">
+              <i className="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+          
+          <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-4 pr-2 mb-4 custom-scrollbar">
+            {messages.map((msg, i) => (
+              <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${
+                  msg.role === 'user' 
+                    ? 'bg-blue-600 text-white rounded-tr-none' 
+                    : 'bg-white/50 dark:bg-black/50 text-gray-800 dark:text-gray-200 rounded-tl-none border border-white/20'
+                }`}>
+                  {msg.text}
+                </div>
+              </div>
+            ))}
+            {loading && (
+              <div className="flex justify-start">
+                <div className="bg-white/50 dark:bg-black/50 p-3 rounded-2xl rounded-tl-none border border-white/20">
+                  <div className="flex gap-1">
+                    <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"></div>
+                    <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:0.2s]"></div>
+                    <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce [animation-delay:0.4s]"></div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+          
+          <div className="flex gap-2">
+            <input 
+              type="text" 
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleSend()}
+              placeholder="မေးမြန်းလိုသည်များ ရိုက်ထည့်ပါ..."
+              className="flex-1 glass-input text-sm"
+            />
+            <button 
+              onClick={handleSend}
+              disabled={loading}
+              className="w-10 h-10 flex items-center justify-center bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition disabled:opacity-50"
+            >
+              <i className="fa-solid fa-paper-plane"></i>
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button 
+          onClick={() => setIsOpen(true)}
+          className="w-14 h-14 rounded-full bg-blue-600 text-white shadow-2xl flex items-center justify-center hover:scale-110 transition-transform active:scale-95 group relative"
+        >
+          <div className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full border-2 border-white dark:border-slate-900"></div>
+          <i className="fa-solid fa-robot text-xl"></i>
+          <span className="absolute right-full mr-3 px-3 py-1 bg-black/80 text-white text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
+            AI Assistant ကို မေးမြန်းပါ
+          </span>
+        </button>
+      )}
+    </div>
+  );
+};
+
 // --- Firebase Setup ---
 const firebaseConfig = {
-  apiKey: (import.meta as any).env.VITE_FIREBASE_API_KEY || "AIzaSyA84_UlfKU25PZsN0LISzd1NiFic58o16c",
+  apiKey: (import.meta as any).env.VITE_FIREBASE_API_KEY,
   authDomain: "vpnagentappakira.firebaseapp.com",
   projectId: (import.meta as any).env.VITE_FIREBASE_PROJECT_ID || "vpnagentappakira",
   storageBucket: "vpnagentappakira.firebasestorage.app",
@@ -150,12 +313,12 @@ const Modal = ({ isOpen, title, message, onConfirm, onCancel, confirmText = "အ
   if (!isOpen) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 w-full max-w-sm shadow-2xl transform transition-all">
+      <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 rounded-2xl p-6 w-full max-w-sm shadow-2xl transform transition-all">
         <h3 className="text-xl font-bold mb-2 text-gray-900 dark:text-white">{title}</h3>
         <p className="text-gray-600 dark:text-gray-300 mb-6">{message}</p>
         <div className="flex justify-end space-x-3">
           {onCancel && (
-            <button onClick={onCancel} className="px-4 py-2 rounded-lg text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition">
+            <button onClick={onCancel} className="px-4 py-2 rounded-lg text-gray-600 dark:text-gray-300 hover:bg-white/20 dark:hover:bg-black/20 transition">
               {cancelText}
             </button>
           )}
@@ -428,13 +591,13 @@ export default function App() {
   };
 
   if (authLoading || loading || (user && !isSettingsLoaded)) {
-    return <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 text-gray-500"><i className="fa-solid fa-spinner fa-spin text-3xl"></i></div>;
+    return <div className="min-h-screen flex items-center justify-center bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white text-gray-500"><i className="fa-solid fa-spinner fa-spin text-3xl"></i></div>;
   }
 
   if (!user && auth) {
     return (
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center p-4">
-        <div className="bg-white dark:bg-gray-800 p-8 rounded-3xl shadow-xl w-full max-w-sm text-center">
+      <div className="min-h-screen bg-gradient-to-br from-slate-100 via-white to-blue-50 dark:from-gray-900 dark:via-slate-900 dark:to-black text-gray-900 dark:text-gray-100 flex items-center justify-center p-4">
+        <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 p-8 rounded-3xl shadow-xl w-full max-w-sm text-center">
           <div className="w-20 h-20 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center mx-auto mb-6">
             <i className="fa-brands fa-google text-3xl text-blue-600 dark:text-blue-400"></i>
           </div>
@@ -451,8 +614,8 @@ export default function App() {
 
   if (isLocked && settings.pin) {
     return (
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center p-4">
-        <div className="bg-white dark:bg-gray-800 p-8 rounded-3xl shadow-xl w-full max-w-sm text-center">
+      <div className="min-h-screen bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white flex items-center justify-center p-4">
+        <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 p-8 rounded-3xl shadow-xl w-full max-w-sm text-center">
           <div className="w-20 h-20 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center mx-auto mb-6">
             <i className="fa-solid fa-lock text-3xl text-blue-600 dark:text-blue-400"></i>
           </div>
@@ -464,7 +627,7 @@ export default function App() {
               maxLength={6}
               value={pinInput}
               onChange={e => setPinInput(e.target.value)}
-              className="w-full text-center text-3xl tracking-[0.5em] p-4 border-2 border-gray-200 dark:border-gray-700 rounded-xl mb-6 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white focus:border-blue-500 focus:ring-0 transition outline-none"
+              className="w-full text-center text-3xl tracking-[0.5em] p-4 border-2 border-white/40 dark:border-white/10 rounded-xl mb-6 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white text-gray-900 dark:text-white focus:border-blue-500 focus:ring-0 transition outline-none"
               autoFocus
             />
             <button type="submit" className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-lg transition shadow-lg shadow-blue-600/30">
@@ -481,23 +644,29 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-sans transition-colors duration-200">
+    <div className="min-h-screen font-sans transition-colors duration-200 relative overflow-x-hidden">
+      {/* Decorative Orbs for Glassmorphism */}
+      <div className="fixed top-0 left-0 w-full h-full overflow-hidden -z-10 pointer-events-none">
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-blue-400/20 dark:bg-blue-600/20 blur-[120px]"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-indigo-400/20 dark:bg-indigo-600/20 blur-[120px]"></div>
+      </div>
+
       {/* Header */}
-      <header className="sticky top-0 z-30 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-gray-200 dark:border-gray-800 px-4 py-3 flex justify-between items-center">
+      <header className="sticky top-0 z-30 glass border-b border-white/40 dark:border-white/10 px-4 py-3 flex justify-between items-center shadow-sm">
         <div className="flex items-center gap-3">
-          <button onClick={() => setDrawerOpen(true)} className="p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-800 transition">
+          <button onClick={() => setDrawerOpen(true)} className="p-2 rounded-xl hover:bg-white/60 dark:hover:bg-white/10 transition border border-transparent hover:border-white/20">
             <i className="fa-solid fa-bars text-xl"></i>
           </button>
-          <h1 className="text-lg font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent hidden sm:block">
+          <h1 className="text-lg font-bold bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-blue-400 dark:to-indigo-400 bg-clip-text text-transparent hidden sm:block tracking-wide">
             VPN Agent Pro
           </h1>
         </div>
         <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 bg-gray-100 dark:bg-gray-800 px-3 py-1.5 rounded-full text-sm font-medium">
+          <div className="flex items-center gap-2 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 px-4 py-1.5 rounded-full text-sm font-medium shadow-inner">
             <i className="fa-solid fa-dollar-sign text-green-500"></i>
-            <span>{settings.exchangeRate} MMK</span>
+            <span className="tracking-wider">{settings.exchangeRate} MMK</span>
           </div>
-          <button onClick={() => setSettings(s => ({ ...s, darkMode: !s.darkMode }))} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 transition w-10 h-10 flex items-center justify-center">
+          <button onClick={() => setSettings(s => ({ ...s, darkMode: !s.darkMode }))} className="p-2 rounded-full hover:bg-white/60 dark:hover:bg-white/10 transition w-10 h-10 flex items-center justify-center border border-transparent hover:border-white/20 backdrop-blur-md">
             <i className={`fa-solid ${settings.darkMode ? 'fa-sun text-yellow-400' : 'fa-moon text-gray-600'}`}></i>
           </button>
         </div>
@@ -506,11 +675,11 @@ export default function App() {
       {/* Drawer */}
       {drawerOpen && (
         <div className="fixed inset-0 z-40 flex">
-          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setDrawerOpen(false)}></div>
-          <div className="relative w-80 bg-white dark:bg-gray-900 h-full shadow-2xl flex flex-col transform transition-transform">
-            <div className="p-6 border-b border-gray-200 dark:border-gray-800 flex justify-between items-center">
-              <h2 className="text-xl font-bold">မီနူး</h2>
-              <button onClick={() => setDrawerOpen(false)} className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full">
+          <div className="absolute inset-0 bg-black/20 dark:bg-black/60 backdrop-blur-sm transition-opacity" onClick={() => setDrawerOpen(false)}></div>
+          <div className="relative w-80 bg-white/70 dark:bg-black/70 backdrop-blur-2xl h-full shadow-[20px_0_40px_rgba(0,0,0,0.1)] dark:shadow-[20px_0_40px_rgba(0,0,0,0.5)] border-r border-white/40 dark:border-white/10 flex flex-col transform transition-transform">
+            <div className="p-6 border-b border-white/40 dark:border-white/10 flex justify-between items-center">
+              <h2 className="text-xl font-bold tracking-wide">မီနူး</h2>
+              <button onClick={() => setDrawerOpen(false)} className="p-2 hover:bg-white/50 dark:hover:bg-white/10 rounded-full transition border border-transparent hover:border-white/20">
                 <i className="fa-solid fa-xmark"></i>
               </button>
             </div>
@@ -529,14 +698,14 @@ export default function App() {
                 <button
                   key={tab.id}
                   onClick={() => { setActiveTab(tab.id); setDrawerOpen(false); }}
-                  className={`w-full flex items-center gap-4 px-4 py-3 rounded-xl transition ${activeTab === tab.id ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 font-bold' : 'hover:bg-gray-50 dark:hover:bg-gray-800'}`}
+                  className={`w-full flex items-center gap-4 px-4 py-3 rounded-xl transition ${activeTab === tab.id ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 font-bold' : 'hover:bg-white/20 dark:hover:bg-black/20'}`}
                 >
                   <i className={`fa-solid ${tab.icon} w-5 text-center`}></i>
                   <span>{tab.label}</span>
                 </button>
               ))}
             </div>
-            <div className="p-4 border-t border-gray-200 dark:border-gray-800 space-y-3">
+            <div className="p-4 border-t border-white/40 dark:border-white/10 space-y-3">
               {deferredPrompt && (
                 <button onClick={handleInstallPWA} className="w-full flex items-center justify-center gap-2 py-3 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded-xl hover:bg-blue-100 dark:hover:bg-blue-900/40 transition font-medium">
                   <i className="fa-solid fa-download"></i>
@@ -580,6 +749,7 @@ export default function App() {
         {activeTab === 'settings' && <SettingsPanel settings={settings} setSettings={setSettings} user={user} />}
       </main>
 
+      <AIAssistant records={records} settings={settings} />
       <Modal {...modal} />
     </div>
   );
@@ -712,7 +882,7 @@ function Dashboard({ records, settings }: { records: RecordData[], settings: Set
       </div>
 
       {/* Target Progress */}
-      <div className="bg-white dark:bg-gray-800 p-6 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800">
+      <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 p-6 rounded-3xl shadow-sm border border-white/40 dark:border-white/10">
         <div className="flex justify-between items-end mb-4">
           <div>
             <h3 className="text-gray-500 dark:text-gray-400 text-sm font-medium mb-1">လစဉ် အမြတ်ပစ်မှတ်</h3>
@@ -722,13 +892,13 @@ function Dashboard({ records, settings }: { records: RecordData[], settings: Set
             <span className="text-2xl font-bold text-blue-600 dark:text-blue-400">{progress.toFixed(1)}%</span>
           </div>
         </div>
-        <div className="h-4 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden">
+        <div className="h-4 bg-white/20 dark:bg-black/20 rounded-full overflow-hidden">
           <div className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full transition-all duration-1000" style={{ width: `${progress}%` }}></div>
         </div>
       </div>
 
       {/* Best Day Comparison */}
-      <div className="bg-white dark:bg-gray-800 p-6 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800">
+      <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 p-6 rounded-3xl shadow-sm border border-white/40 dark:border-white/10">
         <h3 className="text-lg font-bold mb-4">အကောင်းဆုံး ရောင်းရငွေ (Best Sales Day)</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="p-4 rounded-2xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800/50">
@@ -742,7 +912,7 @@ function Dashboard({ records, settings }: { records: RecordData[], settings: Set
               <div className="text-gray-500">မှတ်တမ်းမရှိပါ</div>
             )}
           </div>
-          <div className="p-4 rounded-2xl bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700">
+          <div className="p-4 rounded-2xl bg-white/20 dark:bg-black/20 border border-white/40 dark:border-white/10">
             <div className="text-sm text-gray-500 dark:text-gray-400 font-medium mb-1">ပြီးခဲ့သောလ ({lastMonth})</div>
             {bestLastMonth ? (
               <>
@@ -757,7 +927,7 @@ function Dashboard({ records, settings }: { records: RecordData[], settings: Set
       </div>
 
       {/* Chart */}
-      <div className="bg-white dark:bg-gray-800 p-6 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800">
+      <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 p-6 rounded-3xl shadow-sm border border-white/40 dark:border-white/10">
         <h3 className="text-lg font-bold mb-6">ရက် ၃၀ အမြတ်ငွေ အပြောင်းအလဲ</h3>
         <SVGChart data={chartData} />
       </div>
@@ -773,7 +943,7 @@ function StatCard({ title, value, subValue, icon, color }: any) {
     red: 'bg-red-50 dark:bg-red-900/20 text-red-600',
   };
   return (
-    <div className="bg-white dark:bg-gray-800 p-5 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800">
+    <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl p-5 rounded-3xl shadow-lg border border-white/40 dark:border-white/10">
       <div className={`w-10 h-10 rounded-xl flex items-center justify-center mb-4 ${colors[color]}`}>
         <i className={`fa-solid ${icon}`}></i>
       </div>
@@ -824,12 +994,12 @@ function EntryForm({ records, onSave }: { records: RecordData[], onSave: (r: Rec
   const calc = calculateRecord(state);
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden animate-in fade-in zoom-in-95 duration-300">
-      <div className="p-4 sm:p-6 border-b border-gray-100 dark:border-gray-800 flex justify-between items-center bg-gray-50/50 dark:bg-gray-900/50">
+    <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl rounded-3xl shadow-lg border border-white/40 dark:border-white/10 overflow-hidden animate-in fade-in zoom-in-95 duration-300">
+      <div className="p-4 sm:p-6 border-b border-white/40 dark:border-white/10 flex justify-between items-center bg-white/30 dark:bg-black/30 backdrop-blur-md">
         <h2 className="text-xl font-bold">စာရင်းအသစ်သွင်းမည်</h2>
         <div className="flex gap-2">
-          <button onClick={undo} disabled={!canUndo} className="p-2 rounded-lg bg-white dark:bg-gray-800 shadow-sm border border-gray-200 dark:border-gray-700 disabled:opacity-50 hover:bg-gray-50 dark:hover:bg-gray-700 transition"><i className="fa-solid fa-rotate-left"></i></button>
-          <button onClick={redo} disabled={!canRedo} className="p-2 rounded-lg bg-white dark:bg-gray-800 shadow-sm border border-gray-200 dark:border-gray-700 disabled:opacity-50 hover:bg-gray-50 dark:hover:bg-gray-700 transition"><i className="fa-solid fa-rotate-right"></i></button>
+          <button onClick={undo} disabled={!canUndo} className="p-2 rounded-lg bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 shadow-sm border border-white/40 dark:border-white/10 disabled:opacity-50 hover:bg-white/20 dark:hover:bg-black/20 transition"><i className="fa-solid fa-rotate-left"></i></button>
+          <button onClick={redo} disabled={!canRedo} className="p-2 rounded-lg bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 shadow-sm border border-white/40 dark:border-white/10 disabled:opacity-50 hover:bg-white/20 dark:hover:bg-black/20 transition"><i className="fa-solid fa-rotate-right"></i></button>
         </div>
       </div>
 
@@ -837,7 +1007,7 @@ function EntryForm({ records, onSave }: { records: RecordData[], onSave: (r: Rec
         {/* Date */}
         <div>
           <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">ရက်စွဲ</label>
-          <input type="date" value={state.date} onChange={e => handleChange('date', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none transition" />
+          <input type="date" value={state.date} onChange={e => handleChange('date', e.target.value)} className="w-full p-3 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition" />
         </div>
 
         {/* Points */}
@@ -885,18 +1055,18 @@ function EntryForm({ records, onSave }: { records: RecordData[], onSave: (r: Rec
           <div className="space-y-3">
             {state.expenses.map((exp, i) => (
               <div key={exp.id} className="flex gap-2 items-start">
-                <input list="expense-desc" placeholder="အကြောင်းအရာ" value={exp.desc} onChange={e => handleExpenseChange(i, 'desc', e.target.value)} className="flex-1 p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" />
-                <input type="number" placeholder="ပမာဏ" value={exp.amount} onChange={e => handleExpenseChange(i, 'amount', e.target.value)} className="w-1/3 p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" />
+                <input list="expense-desc" placeholder="အကြောင်းအရာ" value={exp.desc} onChange={e => handleExpenseChange(i, 'desc', e.target.value)} className="flex-1 p-3 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none" />
+                <input type="number" placeholder="ပမာဏ" value={exp.amount} onChange={e => handleExpenseChange(i, 'amount', e.target.value)} className="w-1/3 p-3 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none" />
                 <button onClick={() => removeExpense(i)} className="p-3 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-xl transition"><i className="fa-solid fa-trash"></i></button>
               </div>
             ))}
-            {state.expenses.length === 0 && <div className="text-center py-6 text-gray-400 border-2 border-dashed border-gray-200 dark:border-gray-800 rounded-xl">ကုန်ကျစရိတ် မရှိပါ</div>}
+            {state.expenses.length === 0 && <div className="text-center py-6 text-gray-400 border-2 border-dashed border-white/40 dark:border-white/10 rounded-xl">ကုန်ကျစရိတ် မရှိပါ</div>}
           </div>
         </div>
       </div>
 
       {/* Live Preview & Submit */}
-      <div className="bg-gray-50 dark:bg-gray-900/50 p-4 sm:p-6 border-t border-gray-100 dark:border-gray-800">
+      <div className="bg-white/30 dark:bg-black/30 backdrop-blur-md p-4 sm:p-6 border-t border-white/40 dark:border-white/10">
         <div className="flex flex-col sm:flex-row justify-between items-center gap-4 mb-6">
           <div>
             <div className="text-sm text-gray-500 dark:text-gray-400 mb-1">ခန့်မှန်း အသားတင်အမြတ်</div>
@@ -934,7 +1104,7 @@ function InputGroup({ label, value, onChange, icon, required }: any) {
           type="number"
           value={value}
           onChange={e => onChange(e.target.value)}
-          className={`w-full p-3 ${icon ? 'pl-10' : ''} rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none transition`}
+          className={`w-full p-3 ${icon ? 'pl-10' : ''} rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none transition`}
           placeholder="0"
         />
       </div>
@@ -954,9 +1124,9 @@ function HistoryList({ records, onDelete, onEdit }: any) {
 function ReceiptCard({ record, onDelete, onEdit }: any) {
   const calc = calculateRecord(record);
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden animate-in fade-in slide-in-from-bottom-4">
+    <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl rounded-3xl shadow-lg border border-white/40 dark:border-white/10 overflow-hidden animate-in fade-in slide-in-from-bottom-4">
       {/* Receipt Header */}
-      <div className="bg-gray-50 dark:bg-gray-900/50 p-4 border-b border-gray-100 dark:border-gray-800 flex justify-between items-center border-dashed">
+      <div className="bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white/50 p-4 border-b border-white/40 dark:border-white/10 flex justify-between items-center border-dashed">
         <div className="font-mono font-bold text-lg">{record.date}</div>
         <div className="flex gap-2">
           <button onClick={onDelete} className="w-8 h-8 rounded-full bg-red-50 dark:bg-red-900/20 text-red-500 flex items-center justify-center hover:bg-red-100 transition"><i className="fa-solid fa-trash text-sm"></i></button>
@@ -969,19 +1139,19 @@ function ReceiptCard({ record, onDelete, onEdit }: any) {
           <div className="text-gray-500">မနက်အဖွင့်</div><div className="text-right font-mono">{formatNum(safeFloat(record.morningOpening))}</div>
           <div className="text-gray-500">ထပ်ဝယ်</div><div className="text-right font-mono">+ {formatNum(safeFloat(record.stockAdded))}</div>
           <div className="text-gray-500">ညအပိတ်</div><div className="text-right font-mono">- {formatNum(safeFloat(record.nightClosing))}</div>
-          <div className="col-span-2 border-t border-gray-100 dark:border-gray-700 my-1"></div>
+          <div className="col-span-2 border-t border-white/40 dark:border-white/10 my-1"></div>
           <div className="font-bold">ရောင်းရပွိုင့်</div><div className="text-right font-mono font-bold">{formatNum(calc.soldPoints)}</div>
           <div className="text-gray-500">အရင်းငွေ (@{formatNum(safeFloat(record.costPerPoint))})</div><div className="text-right font-mono text-red-500">- {formatNum(calc.capitalCost)}</div>
         </div>
 
         {/* Sales */}
-        <div className="bg-gray-50 dark:bg-gray-900/30 rounded-xl p-4">
+        <div className="bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white/30 rounded-xl p-4">
           <div className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Sales</div>
           <div className="grid grid-cols-2 gap-y-1 text-sm">
             <div className="text-gray-500">KBZ Pay</div><div className="text-right font-mono">{formatNum(safeFloat(record.kbzPay))}</div>
             <div className="text-gray-500">Wave Pay</div><div className="text-right font-mono">{formatNum(safeFloat(record.wavePay))}</div>
             <div className="text-gray-500">AYA Pay</div><div className="text-right font-mono">{formatNum(safeFloat(record.ayaPay))}</div>
-            <div className="col-span-2 border-t border-gray-200 dark:border-gray-700 my-1"></div>
+            <div className="col-span-2 border-t border-white/40 dark:border-white/10 my-1"></div>
             <div className="font-bold text-green-600">Total Sales</div><div className="text-right font-mono font-bold text-green-600">{formatNum(calc.totalSales)}</div>
           </div>
         </div>
@@ -1001,7 +1171,7 @@ function ReceiptCard({ record, onDelete, onEdit }: any) {
         )}
 
         {/* Net Profit */}
-        <div className="border-t-2 border-dashed border-gray-200 dark:border-gray-700 pt-4 flex justify-between items-end">
+        <div className="border-t-2 border-dashed border-white/40 dark:border-white/10 pt-4 flex justify-between items-end">
           <div>
             <div className="text-sm text-gray-500 mb-1">အသားတင်အမြတ်</div>
             <div className="text-xs font-medium bg-blue-50 dark:bg-blue-900/30 text-blue-600 px-2 py-1 rounded">Margin: {calc.margin.toFixed(1)}%</div>
@@ -1066,7 +1236,7 @@ function SummaryCard({ title, records }: { title: string, records: RecordData[] 
   const bankDeposits = records.reduce((sum, r) => sum + calculateRecord(r).bankDeposits, 0);
 
   return (
-    <div className="bg-white dark:bg-gray-800 p-6 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800">
+    <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 p-6 rounded-3xl shadow-sm border border-white/40 dark:border-white/10">
       <h3 className="text-lg font-bold mb-4 text-gray-800 dark:text-gray-200">{title}</h3>
       <div className="space-y-3">
         <div className="flex justify-between">
@@ -1077,13 +1247,13 @@ function SummaryCard({ title, records }: { title: string, records: RecordData[] 
           <span className="text-gray-500">ကုန်ကျစရိတ်</span>
           <span className="font-mono text-red-500">- {formatNum(totalExpenses)}</span>
         </div>
-        <div className="flex justify-between border-t border-gray-100 dark:border-gray-700 pt-2">
+        <div className="flex justify-between border-t border-white/40 dark:border-white/10 pt-2">
           <span className="font-medium">အသားတင်အမြတ်</span>
           <span className={`font-mono font-bold ${netProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
             {formatNum(netProfit)}
           </span>
         </div>
-        <div className="flex justify-between border-t border-gray-100 dark:border-gray-700 pt-2 mt-2">
+        <div className="flex justify-between border-t border-white/40 dark:border-white/10 pt-2 mt-2">
           <span className="text-gray-500">ဘဏ်သွင်းငွေ</span>
           <span className="font-mono text-purple-600">{formatNum(bankDeposits)}</span>
         </div>
@@ -1118,7 +1288,7 @@ function DepositsList({ records }: { records: RecordData[] }) {
         <h2 className="text-2xl font-bold">ဘဏ်သွင်းငွေများ</h2>
       </div>
 
-      <div className="bg-white dark:bg-gray-800 p-4 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 p-4 rounded-2xl shadow-sm border border-white/40 dark:border-white/10 grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="relative">
           <i className="fa-solid fa-search absolute left-3 top-3 text-gray-400"></i>
           <input 
@@ -1126,25 +1296,25 @@ function DepositsList({ records }: { records: RecordData[] }) {
             placeholder="ဘဏ်အမည် ရှာရန်..." 
             value={searchTerm}
             onChange={e => setSearchTerm(e.target.value)}
-            className="w-full pl-10 p-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 outline-none"
+            className="w-full pl-10 p-2 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white outline-none"
           />
         </div>
         <input 
           type="date" 
           value={startDate}
           onChange={e => setStartDate(e.target.value)}
-          className="w-full p-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 outline-none"
+          className="w-full p-2 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white outline-none"
         />
         <input 
           type="date" 
           value={endDate}
           onChange={e => setEndDate(e.target.value)}
-          className="w-full p-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 outline-none"
+          className="w-full p-2 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white outline-none"
         />
       </div>
       
-      <div className="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
-        <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50 flex justify-between font-bold">
+      <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 rounded-3xl shadow-sm border border-white/40 dark:border-white/10 overflow-hidden">
+        <div className="p-4 border-b border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white/50 flex justify-between font-bold">
           <span>စုစုပေါင်း</span>
           <span className="text-purple-600">{formatNum(total)}</span>
         </div>
@@ -1153,7 +1323,7 @@ function DepositsList({ records }: { records: RecordData[] }) {
             <div className="p-8 text-center text-gray-500">မှတ်တမ်းမရှိပါ</div>
           ) : (
             deposits.map((d, i) => (
-              <div key={i} className="p-4 flex justify-between items-center hover:bg-gray-50 dark:hover:bg-gray-900/50 transition">
+              <div key={i} className="p-4 flex justify-between items-center hover:bg-white/20 dark:hover:bg-black/20 transition">
                 <div>
                   <div className="font-medium">{d.bank}</div>
                   <div className="text-sm text-gray-500">{d.date}</div>
@@ -1190,7 +1360,7 @@ function ExpensesList({ records }: { records: RecordData[] }) {
         <h2 className="text-2xl font-bold">ကုန်ကျစရိတ်များ</h2>
       </div>
 
-      <div className="bg-white dark:bg-gray-800 p-4 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 p-4 rounded-2xl shadow-sm border border-white/40 dark:border-white/10 grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="relative">
           <i className="fa-solid fa-search absolute left-3 top-3 text-gray-400"></i>
           <input 
@@ -1198,25 +1368,25 @@ function ExpensesList({ records }: { records: RecordData[] }) {
             placeholder="အကြောင်းအရာ ရှာရန်..." 
             value={searchTerm}
             onChange={e => setSearchTerm(e.target.value)}
-            className="w-full pl-10 p-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 outline-none"
+            className="w-full pl-10 p-2 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white outline-none"
           />
         </div>
         <input 
           type="date" 
           value={startDate}
           onChange={e => setStartDate(e.target.value)}
-          className="w-full p-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 outline-none"
+          className="w-full p-2 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white outline-none"
         />
         <input 
           type="date" 
           value={endDate}
           onChange={e => setEndDate(e.target.value)}
-          className="w-full p-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 outline-none"
+          className="w-full p-2 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white outline-none"
         />
       </div>
       
-      <div className="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
-        <div className="p-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50 flex justify-between font-bold">
+      <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 rounded-3xl shadow-sm border border-white/40 dark:border-white/10 overflow-hidden">
+        <div className="p-4 border-b border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white/50 flex justify-between font-bold">
           <span>စုစုပေါင်း</span>
           <span className="text-red-600">{formatNum(total)}</span>
         </div>
@@ -1225,7 +1395,7 @@ function ExpensesList({ records }: { records: RecordData[] }) {
             <div className="p-8 text-center text-gray-500">မှတ်တမ်းမရှိပါ</div>
           ) : (
             expenses.map((e, i) => (
-              <div key={i} className="p-4 flex justify-between items-center hover:bg-gray-50 dark:hover:bg-gray-900/50 transition">
+              <div key={i} className="p-4 flex justify-between items-center hover:bg-white/20 dark:hover:bg-black/20 transition">
                 <div>
                   <div className="font-medium">{e.desc}</div>
                   <div className="text-sm text-gray-500">{e.date}</div>
@@ -1263,11 +1433,11 @@ function ProfitLossStatement({ records, settings }: { records: RecordData[], set
           type="month" 
           value={selectedMonth} 
           onChange={e => setSelectedMonth(e.target.value)} 
-          className="p-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none"
+          className="p-2 rounded-xl border border-white/40 dark:border-white/10 bg-white/40 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 outline-none"
         />
       </div>
 
-      <div className="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 p-6 space-y-6">
+      <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl rounded-3xl shadow-lg border border-white/40 dark:border-white/10 p-6 space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-2xl border border-blue-100 dark:border-blue-800/50">
             <div className="text-blue-600 dark:text-blue-400 text-sm font-bold mb-1">စုစုပေါင်း ရောင်းရငွေ</div>
@@ -1283,14 +1453,14 @@ function ProfitLossStatement({ records, settings }: { records: RecordData[], set
           </div>
         </div>
 
-        <div className="border-t-2 border-dashed border-gray-200 dark:border-gray-700 pt-6">
+        <div className="border-t-2 border-dashed border-white/40 dark:border-white/10 pt-6">
           <div className="flex flex-col items-center justify-center text-center">
             <div className="text-gray-500 font-medium mb-2 uppercase tracking-widest text-sm">အသားတင် အမြတ် (Net Profit)</div>
             <div className={`text-5xl font-mono font-black ${netProfit >= 0 ? 'text-green-500' : 'text-red-500'}`}>
               {formatNum(netProfit)}
             </div>
             {totalSales > 0 && (
-              <div className="mt-3 text-sm font-medium bg-gray-100 dark:bg-gray-900 px-3 py-1 rounded-full text-gray-600 dark:text-gray-400">
+              <div className="mt-3 text-sm font-medium bg-white/20 dark:bg-black/20 px-3 py-1 rounded-full text-gray-600 dark:text-gray-400">
                 Profit Margin: {((netProfit / totalSales) * 100).toFixed(1)}%
               </div>
             )}
@@ -1342,7 +1512,7 @@ function SettingsPanel({ settings, setSettings, user }: any) {
   };
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 p-6 space-y-6 animate-in fade-in">
+    <div className="bg-white/40 dark:bg-black/40 backdrop-blur-xl rounded-3xl shadow-lg border border-white/40 dark:border-white/10 p-6 space-y-6 animate-in fade-in">
       <h2 className="text-2xl font-bold mb-6">ဆက်တင်များ</h2>
       
       {user && (
@@ -1357,22 +1527,22 @@ function SettingsPanel({ settings, setSettings, user }: any) {
 
       <div>
         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">App PIN (ဂဏန်း ၄ လုံး သို့ ၆ လုံး)</label>
-        <input type="password" value={localSettings.pin} onChange={e => handleChange('pin', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="PIN မထားလိုပါက အလွတ်ထားပါ" />
+        <input type="password" value={localSettings.pin} onChange={e => handleChange('pin', e.target.value)} className="w-full p-3 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none" placeholder="PIN မထားလိုပါက အလွတ်ထားပါ" />
       </div>
 
       <div>
         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">လစဉ် အမြတ်ပစ်မှတ် (Target)</label>
-        <input type="number" value={localSettings.monthlyTarget} onChange={e => handleChange('monthlyTarget', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" />
+        <input type="number" value={localSettings.monthlyTarget} onChange={e => handleChange('monthlyTarget', e.target.value)} className="w-full p-3 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none" />
       </div>
 
       <div>
         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">လက်ကျန်ပွိုင့် သတိပေးချက် (Stock Alert)</label>
-        <input type="number" value={localSettings.stockAlert} onChange={e => handleChange('stockAlert', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" />
+        <input type="number" value={localSettings.stockAlert} onChange={e => handleChange('stockAlert', e.target.value)} className="w-full p-3 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none" />
       </div>
 
       <div>
         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">ဒေါ်လာ ငွေလဲနှုန်း (Exchange Rate)</label>
-        <input type="number" value={localSettings.exchangeRate} onChange={e => handleChange('exchangeRate', e.target.value)} className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" />
+        <input type="number" value={localSettings.exchangeRate} onChange={e => handleChange('exchangeRate', e.target.value)} className="w-full p-3 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md border border-white/40 dark:border-white/10 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none" />
       </div>
 
       <div className="pt-4">
@@ -1494,17 +1664,18 @@ function VoucherGenerator() {
   const handleDownload = async () => {
     if (voucherRef.current) {
       try {
-        const canvas = await html2canvas(voucherRef.current, {
-          scale: 2,
+        const element = voucherRef.current;
+        
+        // Use modern-screenshot which supports modern CSS like oklch and backdrop-filter
+        const dataUrl = await domToPng(element, {
+          scale: 3,
           backgroundColor: '#ffffff',
-          useCORS: true,
-          allowTaint: true,
-          logging: false
+          quality: 1,
         });
-        const image = canvas.toDataURL('image/png', 1.0);
+
         const link = document.createElement('a');
         link.download = `Voucher_${customerName || 'Customer'}_${date}.png`;
-        link.href = image;
+        link.href = dataUrl;
         link.click();
       } catch (error) {
         console.error('Error generating voucher image:', error);
@@ -1519,14 +1690,14 @@ function VoucherGenerator() {
       
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Form Section */}
-        <div className="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 p-6 space-y-4">
+        <div className="glass-card space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Customer Telegram Name</label>
             <input 
               type="text" 
               value={customerName} 
               onChange={e => setCustomerName(e.target.value)} 
-              className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" 
+              className="w-full glass-input" 
               placeholder="e.g. John Doe"
             />
           </div>
@@ -1540,7 +1711,7 @@ function VoucherGenerator() {
             </div>
             
             {items.map((item, index) => (
-              <div key={index} className="p-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50 space-y-3 relative">
+              <div key={index} className="p-4 rounded-xl border border-white/40 dark:border-white/10 bg-white/30 dark:bg-black/30 backdrop-blur-md space-y-3 relative">
                 {items.length > 1 && (
                   <button 
                     onClick={() => removeItem(index)} 
@@ -1556,7 +1727,7 @@ function VoucherGenerator() {
                     type="email" 
                     value={item.email} 
                     onChange={e => updateItem(index, 'email', e.target.value)} 
-                    className="w-full p-2.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none text-sm" 
+                    className="w-full glass-input text-sm" 
                     placeholder="e.g. user@gmail.com"
                   />
                 </div>
@@ -1567,7 +1738,7 @@ function VoucherGenerator() {
                     <select 
                       value={item.plan} 
                       onChange={e => updateItem(index, 'plan', e.target.value)} 
-                      className="w-full p-2.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+                      className="w-full glass-input text-sm"
                     >
                       {plans.map(p => (
                         <option key={p.name} value={`${p.name} - ${p.price}`}>{p.name} - {p.price}</option>
@@ -1581,7 +1752,7 @@ function VoucherGenerator() {
                       min="1"
                       value={item.qty} 
                       onChange={e => updateItem(index, 'qty', parseInt(e.target.value) || 1)} 
-                      className="w-full p-2.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 outline-none text-sm" 
+                      className="w-full glass-input text-sm" 
                     />
                   </div>
                 </div>
@@ -1595,7 +1766,7 @@ function VoucherGenerator() {
               <select 
                 value={paymentMethod} 
                 onChange={e => setPaymentMethod(e.target.value)} 
-                className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                className="w-full glass-input"
               >
                 {paymentMethods.map(pm => (
                   <option key={pm} value={pm}>{pm}</option>
@@ -1609,7 +1780,7 @@ function VoucherGenerator() {
                 type="date" 
                 value={date} 
                 onChange={e => setDate(e.target.value)} 
-                className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" 
+                className="w-full glass-input" 
               />
             </div>
           </div>
@@ -1621,7 +1792,7 @@ function VoucherGenerator() {
                 type="number" 
                 value={discount} 
                 onChange={e => setDiscount(e.target.value === '' ? '' : Number(e.target.value))} 
-                className="w-full p-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none" 
+                className="w-full glass-input" 
                 placeholder="0"
               />
             </div>
@@ -1631,7 +1802,7 @@ function VoucherGenerator() {
                 type="file" 
                 accept="image/*"
                 onChange={handleLogoUpload} 
-                className="w-full p-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 focus:ring-2 focus:ring-blue-500 outline-none text-sm file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" 
+                className="w-full p-2 rounded-xl border border-white/40 dark:border-white/10 bg-white/50 dark:bg-black/50 backdrop-blur-md focus:ring-2 focus:ring-blue-500 outline-none text-sm text-gray-900 dark:text-white file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" 
               />
             </div>
           </div>
@@ -1652,110 +1823,127 @@ function VoucherGenerator() {
           <div className="overflow-x-auto pb-4">
             <div 
               ref={voucherRef} 
-              className="bg-white p-8 rounded-xl shadow-sm border border-gray-200 w-full max-w-md mx-auto relative overflow-hidden text-gray-800"
-              style={{ minWidth: '350px' }}
+              data-voucher="true"
+              className="bg-white p-10 rounded-none shadow-2xl w-full max-w-md mx-auto relative overflow-hidden text-gray-900 font-sans border-[12px] border-double border-slate-100"
+              style={{ minWidth: '400px' }}
             >
-              {/* Decorative Header */}
-              <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-blue-500 to-indigo-600"></div>
+              {/* Luxury Background Accents */}
+              <div className="absolute top-0 right-0 w-32 h-32 bg-slate-50 rounded-full -mr-16 -mt-16 opacity-50"></div>
+              <div className="absolute bottom-0 left-0 w-24 h-24 bg-slate-50 rounded-full -ml-12 -mb-12 opacity-50"></div>
               
-              <div className="text-center mb-8 mt-2">
-                {/* Logo Area */}
-                <div className="flex justify-center items-center h-20 mb-3">
-                  {logoUrl ? (
-                    <img 
-                      src={logoUrl} 
-                      alt="Logo" 
-                      crossOrigin="anonymous"
-                      style={{ maxWidth: '80px', maxHeight: '80px', objectFit: 'contain' }}
-                    />
-                  ) : (
-                    <div className="relative w-20 h-20 mx-auto">
+              {/* Header Section */}
+              <div className="relative z-10 text-center mb-10">
+                <div className="flex justify-center items-center mb-6">
+                  <div className="relative p-1 border border-slate-200 rounded-full">
+                    {logoUrl ? (
                       <img 
-                        src="/jumpjump.png" 
-                        alt="Jump Jump VPN" 
-                        crossOrigin="anonymous"
-                        className="w-full h-full object-contain"
-                        onError={(e) => {
-                          e.currentTarget.style.display = 'none';
-                          e.currentTarget.nextElementSibling?.classList.remove('hidden');
-                          e.currentTarget.nextElementSibling?.classList.add('flex');
-                        }}
+                        src={logoUrl} 
+                        alt="Logo" 
+                        className="w-16 h-16 object-contain rounded-full"
                       />
-                      <div className="hidden items-center justify-center w-full h-full rounded-full bg-blue-50 text-blue-600">
-                        <i className="fa-solid fa-shield-halved text-4xl"></i>
+                    ) : (
+                      <div className="w-16 h-16 flex items-center justify-center rounded-full bg-slate-900 text-white">
+                        <i className="fa-solid fa-crown text-2xl"></i>
                       </div>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
                 
-                <h1 className="text-2xl font-black tracking-tight text-gray-900 uppercase">Jump Jump VPN</h1>
-                <p className="text-sm text-gray-500 font-medium tracking-widest uppercase mt-1">Official Receipt</p>
+                <h1 className="font-serif text-3xl font-bold tracking-tight text-slate-900 uppercase mb-1">Jump Jump VPN</h1>
+                <div className="flex items-center justify-center gap-3">
+                  <div className="h-[1px] w-8 bg-slate-300"></div>
+                  <p className="text-[10px] text-slate-500 font-bold tracking-[0.3em] uppercase">Premium Service Receipt</p>
+                  <div className="h-[1px] w-8 bg-slate-300"></div>
+                </div>
               </div>
 
-              <div className="space-y-5">
-                <div className="flex justify-between items-center border-b border-gray-100 pb-3">
-                  <span className="text-gray-500 text-sm">Date</span>
-                  <span className="font-medium">{date}</span>
+              {/* Info Grid */}
+              <div className="relative z-10 space-y-6 mb-10">
+                <div className="grid grid-cols-2 gap-4 text-xs">
+                  <div className="space-y-1">
+                    <p className="text-slate-400 uppercase tracking-widest font-bold text-[9px]">Issued Date</p>
+                    <p className="font-medium text-slate-900">{date}</p>
+                  </div>
+                  <div className="space-y-1 text-right">
+                    <p className="text-slate-400 uppercase tracking-widest font-bold text-[9px]">Receipt No.</p>
+                    <p className="font-mono text-slate-900">#{(Math.random() * 10000).toFixed(0).padStart(5, '0')}</p>
+                  </div>
+                </div>
+
+                <div className="space-y-1 border-t border-slate-100 pt-4">
+                  <p className="text-slate-400 uppercase tracking-widest font-bold text-[9px]">Client Name</p>
+                  <p className="font-serif text-lg text-slate-900 italic">{customerName || 'Valued Customer'}</p>
                 </div>
                 
-                <div className="flex justify-between items-center border-b border-gray-100 pb-3">
-                  <span className="text-gray-500 text-sm">Customer</span>
-                  <span className="font-bold text-gray-900">{customerName || '-'}</span>
-                </div>
-                
-                <div className="border-b border-gray-100 pb-3">
-                  <span className="text-gray-500 text-sm block mb-2">Purchased Accounts</span>
-                  <div className="space-y-2">
+                <div className="space-y-3 border-t border-slate-100 pt-4">
+                  <p className="text-slate-400 uppercase tracking-widest font-bold text-[9px] mb-2">Service Details</p>
+                  <div className="space-y-3">
                     {items.map((item, idx) => (
-                      <div key={idx} className="bg-gray-50 p-2 rounded-lg flex justify-between items-center">
+                      <div key={idx} className="flex justify-between items-start group">
                         <div className="flex flex-col">
-                          <span className="font-medium text-blue-600 text-sm">{item.email || '-'}</span>
-                          <span className="text-xs text-gray-500 font-bold">{item.qty}x {item.plan.split(' - ')[0]}</span>
+                          <span className="font-bold text-slate-900 text-sm">{item.plan.split(' - ')[0]}</span>
+                          <span className="text-[10px] text-slate-500 font-medium">{item.email || 'No email provided'}</span>
                         </div>
-                        <span className="font-bold text-gray-800 text-sm">
-                          {formatNum((parseInt(item.plan.split(' - ')[1].replace(/[^0-9]/g, '')) || 0) * item.qty)} Ks
-                        </span>
+                        <div className="text-right">
+                          <p className="font-bold text-slate-900 text-sm">{formatNum((parseInt(item.plan.split(' - ')[1].replace(/[^0-9]/g, '')) || 0) * item.qty)} Ks</p>
+                          <p className="text-[9px] text-slate-400 font-medium">{item.qty} Unit(s)</p>
+                        </div>
                       </div>
                     ))}
                   </div>
                 </div>
                 
-                <div className="flex justify-between items-center border-b border-gray-100 pb-3">
-                  <span className="text-gray-500 text-sm">Payment</span>
-                  <span className="font-medium">{paymentMethod}</span>
+                <div className="flex justify-between items-center border-t border-slate-100 pt-4">
+                  <span className="text-slate-400 uppercase tracking-widest font-bold text-[9px]">Payment Method</span>
+                  <span className="font-bold text-slate-900 text-xs">{paymentMethod}</span>
                 </div>
                 
                 {Number(discount) > 0 && (
-                  <div className="flex justify-between items-center border-b border-gray-100 pb-3">
-                    <span className="text-gray-500 text-sm">Discount</span>
-                    <span className="font-medium text-red-500">-{formatNum(Number(discount))} Ks</span>
+                  <div className="flex justify-between items-center text-red-600">
+                    <span className="uppercase tracking-widest font-bold text-[9px]">Loyalty Discount</span>
+                    <span className="font-bold text-sm">-{formatNum(Number(discount))} Ks</span>
                   </div>
                 )}
-                
-                <div className="flex justify-between items-center pt-2">
-                  <span className="text-gray-500 font-medium">Total Amount</span>
-                  <span className="text-2xl font-black text-indigo-600">{formatNum(totalAmount)} Ks</span>
+              </div>
+
+              {/* Total Section */}
+              <div className="relative z-10 bg-slate-900 text-white p-6 -mx-10 mb-10 flex justify-between items-center">
+                <div className="space-y-1">
+                  <p className="text-slate-400 uppercase tracking-widest font-bold text-[9px]">Total Investment</p>
+                  <p className="text-xs text-slate-500 italic">Thank you for choosing excellence.</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-2xl font-serif font-bold tracking-tight">{formatNum(totalAmount)} Ks</p>
                 </div>
               </div>
 
-              <div className="mt-8 flex justify-center">
-                <div className="p-2 bg-white rounded-xl border border-gray-200 shadow-sm">
-                  <QRCodeCanvas 
+              {/* Footer Section */}
+              <div className="relative z-10 flex flex-col items-center">
+                <div className="mb-6 p-1 bg-white border border-slate-100 shadow-sm">
+                  <QRCodeSVG 
                     value={qrData} 
-                    size={100} 
-                    level={"L"}
+                    size={512} 
+                    level={"H"}
                     includeMargin={false}
+                    style={{ width: '120px', height: '120px' }}
                   />
                 </div>
-              </div>
-
-              <div className="mt-6 pt-6 border-t border-dashed border-gray-300 text-center">
-                <p className="text-sm text-gray-500 mb-2">Thank you for your purchase!</p>
-                <div className="inline-flex items-center gap-2 bg-blue-50 px-4 py-2 rounded-full">
-                  <i className="fa-brands fa-telegram text-blue-500"></i>
-                  <span className="font-bold text-blue-700 text-sm">@AHM_ADMIN</span>
+                
+                <div className="text-center space-y-3">
+                  <p className="font-serif italic text-slate-500 text-sm">Jump Jump VPN — Security & Privacy</p>
+                  <div className="flex items-center justify-center gap-4 text-[10px] font-bold tracking-widest uppercase text-slate-400">
+                    <span className="flex items-center gap-1.5">
+                      <i className="fa-brands fa-telegram text-slate-300"></i>
+                      @AHM_ADMIN
+                    </span>
+                    <div className="w-1 h-1 bg-slate-300 rounded-full"></div>
+                    <span>Yangon, Myanmar</span>
+                  </div>
                 </div>
               </div>
+
+              {/* Bottom Decorative Bar */}
+              <div className="absolute bottom-0 left-0 w-full h-1 bg-slate-900"></div>
             </div>
           </div>
         </div>
