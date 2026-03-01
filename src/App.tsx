@@ -187,6 +187,7 @@ export default function App() {
 
   const [records, setRecords] = useState<RecordData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isSettingsLoaded, setIsSettingsLoaded] = useState(false);
 
   // Modal State
   const [modal, setModal] = useState({ isOpen: false, title: '', message: '', onConfirm: () => {}, onCancel: () => {} });
@@ -232,6 +233,7 @@ export default function App() {
 
   // Data & Settings Sync Effect
   useEffect(() => {
+    setIsSettingsLoaded(false);
     if (user && db) {
       // Load Settings
       const loadSettings = async () => {
@@ -246,6 +248,7 @@ export default function App() {
           await setDoc(docRef, initialSettings);
           setSettings(initialSettings);
         }
+        setIsSettingsLoaded(true);
       };
       loadSettings();
 
@@ -267,6 +270,7 @@ export default function App() {
       const localData = localStorage.getItem('vpn_records');
       if (localData) setRecords(JSON.parse(localData));
       setLoading(false);
+      setIsSettingsLoaded(true);
     }
   }, [user]);
 
@@ -275,17 +279,20 @@ export default function App() {
     if (settings.darkMode) document.documentElement.classList.add('dark');
     else document.documentElement.classList.remove('dark');
     
+    if (!isSettingsLoaded) return; // Prevent overwriting before load
+    
     localStorage.setItem('vpn_settings', JSON.stringify(settings));
     
     if (user && db) {
       setDoc(doc(db, 'users', user.uid, 'settings', 'config'), settings).catch(console.error);
     }
-  }, [settings, user]);
+  }, [settings, user, isSettingsLoaded]);
 
   useEffect(() => {
-    if (!settings.pin) setIsLocked(false);
-    else if (user) setIsLocked(true); // Re-evaluate lock when user changes
-  }, [settings.pin, user]);
+    if (isSettingsLoaded && !settings.pin) {
+      setIsLocked(false);
+    }
+  }, [settings.pin, isSettingsLoaded]);
 
   const saveRecord = async (record: RecordData) => {
     const newRecords = [record, ...records.filter(r => r.id !== record.id)].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
@@ -351,6 +358,26 @@ export default function App() {
     }
   };
 
+  const handleForgotPin = () => {
+    setModal({
+      isOpen: true,
+      title: 'PIN ဖျက်မည်',
+      message: 'PIN နံပါတ်ကို ဖျက်ပြီး အကောင့်ထွက်မည်။ Google ဖြင့် ပြန်လည်ဝင်ရောက်ပါ။',
+      onConfirm: async () => {
+        setModal(m => ({ ...m, isOpen: false }));
+        if (user && db) {
+          const newSettings = { ...settings, pin: '' };
+          await setDoc(doc(db, 'users', user.uid, 'settings', 'config'), newSettings);
+          setSettings(newSettings);
+        }
+        setTimeout(() => {
+          handleLogout();
+        }, 100);
+      },
+      onCancel: () => setModal(m => ({ ...m, isOpen: false }))
+    });
+  };
+
   const exportCSV = () => {
     const headers = ['Date', 'Morning Opening', 'Stock Added', 'Night Closing', 'Cost Per Point', 'Sold Points', 'Capital Cost', 'KBZ Pay', 'Wave Pay', 'AYA Pay', 'Total Sales', 'KBZ Bank', 'Yoma Bank', 'CB Bank', 'Bank Deposits', 'Gross Profit', 'Total Expenses', 'Net Profit'];
     const rows = records.map(r => {
@@ -372,7 +399,7 @@ export default function App() {
     document.body.removeChild(link);
   };
 
-  if (authLoading || loading) {
+  if (authLoading || loading || (user && !isSettingsLoaded)) {
     return <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 text-gray-500"><i className="fa-solid fa-spinner fa-spin text-3xl"></i></div>;
   }
 
@@ -416,6 +443,9 @@ export default function App() {
               ဝင်မည်
             </button>
           </form>
+          <button type="button" onClick={handleForgotPin} className="w-full mt-4 py-3 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 text-sm font-medium transition cursor-pointer">
+            PIN မေ့နေပါသလား? (Reset)
+          </button>
         </div>
         <Modal {...modal} />
       </div>
